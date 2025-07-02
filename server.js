@@ -1,0 +1,117 @@
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const { Server } = require('socket.io');
+
+const ADMIN_USERNAMES = ['yoits_xury']; // Only these can create private rooms
+
+const app = express();
+app.use(cors());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST']
+    }
+});
+
+// In-memory user and room state
+let users = {};
+let rooms = {
+    public: {
+        name: "public",
+        isPrivate: false,
+        members: [],
+        messages: []
+    }
+};
+
+io.on('connection', (socket) => {
+    let currentUser = null;
+
+    socket.on('login', (username, callback) => {
+        currentUser = username;
+        users[socket.id] = username;
+        socket.join('public');
+        rooms.public.members.push(username);
+        callback({
+            success: true,
+            isAdmin: ADMIN_USERNAMES.includes(username),
+            rooms: Object.keys(rooms).map(room => ({
+                name: room,
+                isPrivate: rooms[room].isPrivate
+            }))
+        });
+        io.to('public').emit('update_users', rooms.public.members);
+        socket.emit('chat_history', rooms.public.messages);
+    });
+
+    socket.on('send_message', ({ room, message, emoji }) => {
+        if (!currentUser || !rooms[room]) return;
+        const msg = {
+            sender: currentUser,
+            text: message,
+            emoji: emoji || null,
+            timestamp: Date.now()
+        };
+        rooms[room].messages.push(msg);
+        io.to(room).emit('new_message', msg);
+    });
+
+    socket.on('create_private_room', (roomName, callback) => {
+        if (!currentUser || !ADMIN_USERNAMES.includes(currentUser)) {
+            callback({ success: false, error: "Not authorized" });
+            return;
+        }
+        if (rooms[roomName]) {
+            callback({ success: false, error: "Room already exists" });
+            return;
+        }
+        rooms[roomName] = {
+            name: roomName,
+            isPrivate: true,
+            members: [currentUser],
+            messages: []
+        };
+        socket.join(roomName);
+        callback({ success: true, room: roomName });
+        io.emit('room_list', Object.keys(rooms).map(room => ({
+            name: room,
+            isPrivate: rooms[room].isPrivate
+        })));
+    });
+
+    socket.on('join_room', (roomName, callback) => {
+        if (!currentUser || !rooms[roomName]) {
+            callback({ success: false, error: "Room not found" });
+            return;
+        }
+        if (rooms[roomName].isPrivate && !rooms[roomName].members.includes(currentUser)) {
+            rooms[roomName].members.push(currentUser);
+        }
+        socket.join(roomName);
+        callback({ success: true });
+        socket.emit('chat_history', rooms[roomName].messages);
+    });
+
+    socket.on('disconnect', () => {
+        if (currentUser) {
+            for (const room of Object.values(rooms)) {
+                const idx = room.members.indexOf(currentUser);
+                if (idx !== -1) room.members.splice(idx, 1);
+            }
+            delete users[socket.id];
+            io.to('public').emit('update_users', rooms.public.members);
+        }
+    });
+});
+
+app.get('/', (req, res) => {
+    res.send('Messaging app backend is running.');
+});
+
+const PORT = process.env.PORT || 4000;
+server.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+});
